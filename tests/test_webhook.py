@@ -132,6 +132,24 @@ class WebhookTests(unittest.TestCase):
         self.ask.assert_not_called()
         self.send.assert_not_called()
 
+    def test_group_ignores_plain_text_but_answers_ai_command(self):
+        grp = lambda text, uid: {"update_id": uid, "message": {"message_id": 5, "chat": {"id": -100, "type": "supergroup", "title": "G"}, "text": text}}
+        self.client.post("/webhook", json=grp("just chatting", 30), headers=HEADERS)
+        self.ask.assert_not_called()
+        self.send.assert_not_called()
+        self.client.post("/webhook", json=grp("/Ai@MyBot តើអ្វីជា AI?", 31), headers=HEADERS)
+        self.ask.assert_awaited_once_with("តើអ្វីជា AI?", [])
+        self.send.assert_awaited_once_with(-100, "answer", reply_to=5)
+
+    def test_ai_without_question_shows_usage(self):
+        self.client.post("/webhook", json=update("/Ai", update_id=32), headers=HEADERS)
+        self.ask.assert_not_called()
+        self.assertEqual(self.send.await_args.args[1], self.index.AI_USAGE_TEXT)
+
+    def test_start_greeting(self):
+        self.client.post("/webhook", json=update("/start", update_id=33), headers=HEADERS)
+        self.assertIn("Hello Kon papa", self.send.await_args.args[1])
+
     def test_typing_indicator_sent_for_questions_only(self):
         self.client.post("/webhook", json=update("hi"), headers=HEADERS)
         self.tg.assert_any_await("sendChatAction", {"chat_id": 42, "action": "typing"})

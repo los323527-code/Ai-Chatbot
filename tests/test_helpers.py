@@ -1,6 +1,6 @@
 import unittest
 
-from helpers import format_log_entry, parse_command, secrets_match, split_message, trim_history
+from helpers import extract_ai_question, format_log_entry, parse_command, secrets_match, split_message, trim_history
 
 
 class SplitMessageTests(unittest.TestCase):
@@ -79,6 +79,22 @@ class FormatLogTests(unittest.TestCase):
         out = format_log_entry(None, "x" * 9000)
         self.assertIn("Unknown", out)
         self.assertLess(len(out), 3300)
+
+
+class ExtractAiTests(unittest.TestCase):
+    def test_extract(self):
+        self.assertEqual(extract_ai_question("/Ai សួស្តី"), "សួស្តី")
+        self.assertEqual(extract_ai_question("/ai@MyBot  hello\nworld"), "hello\nworld")
+        self.assertEqual(extract_ai_question("/AI"), "")
+
+    def test_not_ai(self):
+        self.assertIsNone(extract_ai_question("/aiguy hello"))
+        self.assertIsNone(extract_ai_question("hello /Ai"))
+        self.assertIsNone(extract_ai_question(""))
+
+    def test_group_title_in_log(self):
+        out = format_log_entry({"id": 1}, "q", 1760000000, {"type": "supergroup", "title": "Fam"})
+        self.assertIn("Group: Fam", out)
 
 
 if __name__ == "__main__":

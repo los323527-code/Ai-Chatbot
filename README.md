@@ -28,6 +28,11 @@ After changing variables, **redeploy**.
 - Always answers HTTP 200 after validation so Telegram does not retry endlessly.
 - If a token was ever pasted in a chat or screenshot, revoke it (BotFather `/revoke`).
 
+## Groups
+Add the bot to a group and ask with `/Ai your question` (e.g. `/Ai សួស្តី`). In groups
+the bot ignores normal chat and only answers commands, and replies to the asking
+message. Keep Telegram "privacy mode" ON (default) so the bot only receives commands.
+
 ## Finding a channel's ID (`/chatid`)
 Register the webhook with `allowed_updates=["message","channel_post"]`, make the bot
 an admin of the channel, then post `/chatid` in the channel: the bot replies with the

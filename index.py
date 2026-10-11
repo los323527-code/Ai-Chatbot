@@ -17,12 +17,12 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from google import genai
 from google.genai import types
 
-from helpers import format_log_entry, parse_command, secrets_match, split_message, trim_history
+from helpers import extract_ai_question, format_log_entry, parse_command, secrets_match, split_message, trim_history
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("gemini-telegram-bot")
 
-app = FastAPI(title="Gemini Telegram Bot", version="7.0.0", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Gemini Telegram Bot", version="8.0.0", docs_url=None, redoc_url=None, openapi_url=None)
 
 TELEGRAM_API = "https://api.telegram.org"
 DEFAULT_MODEL = "gemini-3.8-flash"
@@ -37,15 +37,12 @@ SYSTEM_INSTRUCTION = (
     "Keep answers suitable for Telegram chat. Do not use Markdown tables."
 )
 
-START_TEXT = (
-    "សួស្តី! 👋 ខ្ញុំជា Gemini AI Bot។\n"
-    "ផ្ញើសំណួរមកខ្ញុំបាន ដូចជា សួរចំណេះដឹង បកប្រែ ឬសរសេរកូដ។\n\n"
-    "Hello! I'm a Gemini AI bot. Send me a question in Khmer or English."
-)
+START_TEXT = "Hello Kon papa 👋 ចង់សួរអីសួរមក"
+AI_USAGE_TEXT = "សរសេរសំណួរបន្ទាប់ពី /Ai ឧ. /Ai សួស្តី\nWrite your question after /Ai, e.g. /Ai hello"
 HELP_TEXT = (
-    "🤖 របៀបប្រើ៖ ផ្ញើសំណួរជាអត្ថបទមកខ្ញុំ។\n"
+    "🤖 របៀបប្រើ៖ ផ្ញើសំណួរជាអត្ថបទមកខ្ញុំ (ក្នុង group ប្រើ /Ai សំណួរ)។\n"
     "/start — ចាប់ផ្ដើម, /help — ជំនួយ, /reset — លុបការចងចាំ\n\n"
-    "How to use: send a text question. Commands: /start, /help, /reset (clear memory)"
+    "How to use: send a text question (in a group: /Ai your question). Commands: /start, /help, /reset"
 )
 LOG_NOTICE = (
     "\n\nℹ️ សំណួររបស់អ្នកអាចត្រូវបានកត់ត្រាដោយម្ចាស់ bot។"
@@ -72,12 +69,12 @@ async def telegram_call(method: str, payload: dict[str, Any]) -> None:
         raise RuntimeError(f"Telegram {method} returned HTTP {response.status_code}")
 
 
-async def send_text(chat_id: int | str, text: str) -> None:
-    for chunk in split_message(text):
-        await telegram_call(
-            "sendMessage",
-            {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True},
-        )
+async def send_text(chat_id: int | str, text: str, reply_to: int | None = None) -> None:
+    for index_, chunk in enumerate(split_message(text)):
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True}
+        if reply_to is not None and index_ == 0:
+            payload["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+        await telegram_call("sendMessage", payload)
 
 
 async def log_to_channel(message: dict, question: str) -> None:
@@ -86,7 +83,7 @@ async def log_to_channel(message: dict, question: str) -> None:
     if not channel:
         return
     try:
-        entry = format_log_entry(message.get("from"), question, message.get("date"))
+        entry = format_log_entry(message.get("from"), question, message.get("date"), message.get("chat"))
         await telegram_call("sendMessage", {"chat_id": channel, "text": entry})
     except Exception as exc:  # noqa: BLE001
         log.warning("channel log failed: %s", type(exc).__name__)
@@ -242,6 +239,12 @@ async def webhook(
     if chat_id is None or not isinstance(text, str) or not text.strip():
         return {"ok": True}
 
+    in_group = chat.get("type") in ("group", "supergroup")
+    command = parse_command(text)
+    ai_question = extract_ai_question(text)
+    if in_group and command is None and ai_question is None:
+        return {"ok": True}  # in groups the bot only reacts to commands such as /Ai
+
     # Posts inside a channel are only used for the /chatid helper; never sent to Gemini.
     if from_channel and parse_command(text) != "chatid":
         return {"ok": True}
@@ -251,20 +254,22 @@ async def webhook(
         return {"ok": True}  # duplicate delivery
 
     # From here on we always answer HTTP 200 so Telegram does not retry endlessly.
+    reply_kw: dict[str, Any] = {"reply_to": message.get("message_id")} if in_group else {}
     try:
-        command = parse_command(text)
         if command == "start":
             notice = LOG_NOTICE if env("LOG_CHANNEL_ID") else ""
-            await send_text(chat_id, START_TEXT + notice)
+            await send_text(chat_id, START_TEXT + notice, **reply_kw)
         elif command == "help":
-            await send_text(chat_id, HELP_TEXT)
+            await send_text(chat_id, HELP_TEXT, **reply_kw)
         elif command == "chatid":
-            await send_text(chat_id, f"Chat ID: {chat_id}")
+            await send_text(chat_id, f"Chat ID: {chat_id}", **reply_kw)
         elif command == "reset":
             await clear_history(chat_id)
-            await send_text(chat_id, RESET_TEXT)
+            await send_text(chat_id, RESET_TEXT, **reply_kw)
+        elif ai_question == "":
+            await send_text(chat_id, AI_USAGE_TEXT, **reply_kw)
         else:
-            question = text.strip()[:MAX_INPUT_CHARS]
+            question = (ai_question if ai_question is not None else text.strip())[:MAX_INPUT_CHARS]
             await log_to_channel(message, question)
             history = await load_history(chat_id)
             typing_task = asyncio.create_task(keep_typing(chat_id))
@@ -280,7 +285,7 @@ async def webhook(
                 typing_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await typing_task
-            await send_text(chat_id, answer)
+            await send_text(chat_id, answer, **reply_kw)
             if answered and answer != EMPTY_ANSWER_TEXT:
                 await save_history(chat_id, history, question, answer)
     except Exception as exc:  # noqa: BLE001
