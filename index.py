@@ -5,6 +5,8 @@ Security notes:
   (httpx error messages can contain the bot token inside the URL).
 - Webhook calls are accepted only with the correct X-Telegram-Bot-Api-Secret-Token.
 """
+import asyncio
+import contextlib
 import logging
 import os
 from typing import Any
@@ -82,6 +84,21 @@ async def send_text(chat_id: int | str, text: str) -> None:
             "sendMessage",
             {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True},
         )
+
+
+async def send_typing(chat_id: int | str) -> None:
+    """Show the "typing..." indicator in Telegram (best effort, never raises)."""
+    try:
+        await telegram_call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("typing indicator failed: %s", type(exc).__name__)
+
+
+async def keep_typing(chat_id: int | str, interval: float = 4.0) -> None:
+    """Telegram hides the indicator after ~5s, so refresh it until cancelled."""
+    while True:
+        await send_typing(chat_id)
+        await asyncio.sleep(interval)
 
 
 async def ask_gemini(prompt: str) -> str:
@@ -165,11 +182,16 @@ async def webhook(
         elif command == "help":
             await send_text(chat_id, HELP_TEXT)
         else:
+            typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 answer = await ask_gemini(text.strip()[:MAX_INPUT_CHARS])
             except Exception as exc:  # noqa: BLE001
                 log.error("Gemini request failed: %s", type(exc).__name__)
                 answer = ERROR_TEXT
+            finally:
+                typing_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await typing_task
             await send_text(chat_id, answer)
     except Exception as exc:  # noqa: BLE001
         log.error("Handling update failed: %s", type(exc).__name__)

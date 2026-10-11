@@ -26,6 +26,7 @@ class WebhookTests(unittest.TestCase):
 
         self.index = index
         self.client = TestClient(index.app)
+        self.tg = patch.object(index, "telegram_call", new=AsyncMock()).start()
         self.send = patch.object(index, "send_text", new=AsyncMock()).start()
         self.ask = patch.object(index, "ask_gemini", new=AsyncMock(return_value="answer")).start()
 
@@ -63,6 +64,13 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.ask.assert_awaited_once_with("សួស្តី")
         self.send.assert_awaited_once_with(42, "answer")
+
+    def test_typing_indicator_sent_for_questions_only(self):
+        self.client.post("/webhook", json=update("hi"), headers=HEADERS)
+        self.tg.assert_any_await("sendChatAction", {"chat_id": 42, "action": "typing"})
+        self.tg.reset_mock()
+        self.client.post("/webhook", json=update("/help", update_id=2), headers=HEADERS)
+        self.tg.assert_not_awaited()
 
     def test_gemini_failure_still_returns_200_with_safe_message(self):
         self.ask.side_effect = RuntimeError("secret details")
