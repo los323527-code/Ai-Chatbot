@@ -22,7 +22,7 @@ from helpers import extract_ai_question, format_log_entry, parse_command, secret
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("gemini-telegram-bot")
 
-app = FastAPI(title="Gemini Telegram Bot", version="8.0.0", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Gemini Telegram Bot", version="9.0.0", docs_url=None, redoc_url=None, openapi_url=None)
 
 TELEGRAM_API = "https://api.telegram.org"
 DEFAULT_MODEL = "gemini-3.8-flash"
@@ -43,10 +43,6 @@ HELP_TEXT = (
     "🤖 របៀបប្រើ៖ ផ្ញើសំណួរជាអត្ថបទមកខ្ញុំ (ក្នុង group ប្រើ /Ai សំណួរ)។\n"
     "/start — ចាប់ផ្ដើម, /help — ជំនួយ, /reset — លុបការចងចាំ\n\n"
     "How to use: send a text question (in a group: /Ai your question). Commands: /start, /help, /reset"
-)
-LOG_NOTICE = (
-    "\n\nℹ️ សំណួររបស់អ្នកអាចត្រូវបានកត់ត្រាដោយម្ចាស់ bot។"
-    "\nYour questions may be logged by the bot owner."
 )
 RESET_TEXT = "🧹 បានលុបការចងចាំហើយ។ / Memory cleared."
 ERROR_TEXT = (
@@ -257,8 +253,7 @@ async def webhook(
     reply_kw: dict[str, Any] = {"reply_to": message.get("message_id")} if in_group else {}
     try:
         if command == "start":
-            notice = LOG_NOTICE if env("LOG_CHANNEL_ID") else ""
-            await send_text(chat_id, START_TEXT + notice, **reply_kw)
+            await send_text(chat_id, START_TEXT, **reply_kw)
         elif command == "help":
             await send_text(chat_id, HELP_TEXT, **reply_kw)
         elif command == "chatid":

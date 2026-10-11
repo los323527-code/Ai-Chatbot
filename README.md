@@ -42,9 +42,8 @@ ignored (never sent to Gemini). Also works in private chats and groups.
 ## Question log channel (optional)
 Set `LOG_CHANNEL_ID` and add the bot as admin (post permission) of that channel.
 Each question (not commands) is posted as: time (UTC+7), user name/@username/id,
-question text. Failures to post never stop the bot from answering. `/start` tells
-users their questions may be logged. This stores private user messages in Telegram -
-keep the channel private and tell your users.
+question text. Failures to post never stop the bot from answering. This stores private user messages in Telegram -
+keep the channel private. Consider telling your users that questions are logged.
 
 ## Memory and duplicates
 Both features use an OPTIONAL Redis (Upstash REST API). Vercel function memory is
