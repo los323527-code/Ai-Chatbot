@@ -1,11 +1,12 @@
 """Pure helper functions (no third-party imports) so they are easy to test."""
 import hmac
 import re
+from datetime import datetime, timedelta, timezone
 
 MAX_TELEGRAM_LENGTH = 4000  # Telegram hard limit is 4096; keep a safety margin.
 EMPTY_FALLBACK = "សូមសាកល្បងម្ដងទៀត។ / Please try again."
 
-_COMMAND_RE = re.compile(r"^/(start|help)(?:@[A-Za-z0-9_]+)?(?:\s|$)", re.IGNORECASE)
+_COMMAND_RE = re.compile(r"^/(start|help|reset)(?:@[A-Za-z0-9_]+)?(?:\s|$)", re.IGNORECASE)
 
 
 def split_message(text: str, limit: int = MAX_TELEGRAM_LENGTH) -> list[str]:
@@ -28,7 +29,7 @@ def split_message(text: str, limit: int = MAX_TELEGRAM_LENGTH) -> list[str]:
 
 
 def parse_command(text: str) -> str | None:
-    """Return 'start' or 'help' for /start, /help, /start@BotName; otherwise None."""
+    """Return 'start', 'help' or 'reset' for /start, /help, /reset (also /cmd@BotName); else None."""
     match = _COMMAND_RE.match((text or "").strip())
     return match.group(1).lower() if match else None
 
@@ -38,3 +39,38 @@ def secrets_match(received: str | None, expected: str | None) -> bool:
     if not received or not expected:
         return False
     return hmac.compare_digest(received.encode("utf-8"), expected.encode("utf-8"))
+
+
+MAX_HISTORY_MESSAGES = 20  # 10 question/answer pairs
+MAX_STORED_CHARS = 2000
+
+
+def trim_history(history: list[dict], max_messages: int = MAX_HISTORY_MESSAGES,
+                 max_chars: int = MAX_STORED_CHARS) -> list[dict]:
+    """Keep only the newest messages, cap each message length, and start on a user turn."""
+    cleaned = [
+        {"role": m["role"], "text": str(m["text"])[:max_chars]}
+        for m in history
+        if isinstance(m, dict) and m.get("role") in ("user", "model") and m.get("text")
+    ]
+    cleaned = cleaned[-max_messages:]
+    while cleaned and cleaned[0]["role"] != "user":
+        cleaned.pop(0)
+    return cleaned
+
+
+LOG_TZ = timezone(timedelta(hours=7))  # Cambodia time (UTC+7), no tzdata needed
+MAX_LOG_QUESTION_CHARS = 3000
+
+
+def format_log_entry(user: dict | None, text: str, unix_ts: int | float | None = None) -> str:
+    """Plain-text line for the owner's log channel: time, user, question."""
+    user = user or {}
+    when = datetime.fromtimestamp(unix_ts, LOG_TZ) if unix_ts else datetime.now(LOG_TZ)
+    name = " ".join(p for p in (user.get("first_name"), user.get("last_name")) if p) or "Unknown"
+    username = f"@{user['username']}" if user.get("username") else "no username"
+    return (
+        f"🕒 Time: {when.strftime('%Y-%m-%d %H:%M:%S')} (UTC+7)\n"
+        f"👤 User: {name} ({username}, id {user.get('id', '?')})\n"
+        f"❓ Question: {(text or '')[:MAX_LOG_QUESTION_CHARS]}"
+    )

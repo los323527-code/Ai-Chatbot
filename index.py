@@ -7,6 +7,7 @@ Security notes:
 """
 import asyncio
 import contextlib
+import json
 import logging
 import os
 from typing import Any
@@ -16,18 +17,19 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from google import genai
 from google.genai import types
 
-from helpers import parse_command, secrets_match, split_message
+from helpers import format_log_entry, parse_command, secrets_match, split_message, trim_history
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("gemini-telegram-bot")
 
-app = FastAPI(title="Gemini Telegram Bot", version="3.0.0", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Gemini Telegram Bot", version="5.0.0", docs_url=None, redoc_url=None, openapi_url=None)
 
 TELEGRAM_API = "https://api.telegram.org"
 DEFAULT_MODEL = "gemini-3.8-flash"
 MAX_INPUT_CHARS = 4000
 GEMINI_TIMEOUT_MS = 45_000
 DEDUPE_TTL_SECONDS = 3600
+HISTORY_TTL_SECONDS = 7 * 24 * 3600
 
 SYSTEM_INSTRUCTION = (
     "You are a helpful Telegram AI assistant. Answer clearly and accurately. "
@@ -42,9 +44,14 @@ START_TEXT = (
 )
 HELP_TEXT = (
     "🤖 របៀបប្រើ៖ ផ្ញើសំណួរជាអត្ថបទមកខ្ញុំ។\n"
-    "/start — ចាប់ផ្ដើម, /help — ជំនួយ\n\n"
-    "How to use: send a text question. Commands: /start, /help"
+    "/start — ចាប់ផ្ដើម, /help — ជំនួយ, /reset — លុបការចងចាំ\n\n"
+    "How to use: send a text question. Commands: /start, /help, /reset (clear memory)"
 )
+LOG_NOTICE = (
+    "\n\nℹ️ សំណួររបស់អ្នកអាចត្រូវបានកត់ត្រាដោយម្ចាស់ bot។"
+    "\nYour questions may be logged by the bot owner."
+)
+RESET_TEXT = "🧹 បានលុបការចងចាំហើយ។ / Memory cleared."
 ERROR_TEXT = (
     "សូមអភ័យទោស! មានបញ្ហាក្នុងការភ្ជាប់ AI។ សូមសាកម្ដងទៀតពេលក្រោយ។\n"
     "Sorry, something went wrong. Please try again later."
@@ -86,6 +93,18 @@ async def send_text(chat_id: int | str, text: str) -> None:
         )
 
 
+async def log_to_channel(message: dict, question: str) -> None:
+    """Post time, user and question to the owner's Telegram channel (optional, best effort)."""
+    channel = env("LOG_CHANNEL_ID")
+    if not channel:
+        return
+    try:
+        entry = format_log_entry(message.get("from"), question, message.get("date"))
+        await telegram_call("sendMessage", {"chat_id": channel, "text": entry})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("channel log failed: %s", type(exc).__name__)
+
+
 async def send_typing(chat_id: int | str) -> None:
     """Show the "typing..." indicator in Telegram (best effort, never raises)."""
     try:
@@ -101,10 +120,73 @@ async def keep_typing(chat_id: int | str, interval: float = 4.0) -> None:
         await asyncio.sleep(interval)
 
 
-async def ask_gemini(prompt: str) -> str:
+def redis_configured() -> bool:
+    return bool(_redis_creds()[0] and _redis_creds()[1])
+
+
+def _redis_creds() -> tuple[str, str]:
+    base = env("UPSTASH_REDIS_REST_URL") or env("KV_REST_API_URL")
+    token = env("UPSTASH_REDIS_REST_TOKEN") or env("KV_REST_API_TOKEN")
+    return base, token
+
+
+async def redis_cmd(*args: str) -> Any:
+    """Run one Redis command through the Upstash REST API. Raises on failure."""
+    base, token = _redis_creds()
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        response = await client.post(
+            base.rstrip("/"),
+            headers={"Authorization": f"Bearer {token}"},
+            json=list(args),
+        )
+    if response.status_code != 200:
+        raise RuntimeError(f"Redis HTTP {response.status_code}")
+    return response.json().get("result")
+
+
+async def load_history(chat_id: int | str) -> list[dict]:
+    """Conversation memory for one chat. Empty if Redis is not configured or fails."""
+    if not redis_configured():
+        return []
+    try:
+        raw = await redis_cmd("GET", f"tg:hist:{chat_id}")
+        return trim_history(json.loads(raw)) if raw else []
+    except Exception as exc:  # noqa: BLE001
+        log.warning("history load failed: %s", type(exc).__name__)
+        return []
+
+
+async def save_history(chat_id: int | str, history: list[dict], question: str, answer: str) -> None:
+    if not redis_configured():
+        return
+    try:
+        updated = trim_history(
+            history + [{"role": "user", "text": question}, {"role": "model", "text": answer}]
+        )
+        await redis_cmd("SET", f"tg:hist:{chat_id}", json.dumps(updated, ensure_ascii=False),
+                        "EX", str(HISTORY_TTL_SECONDS))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("history save failed: %s", type(exc).__name__)
+
+
+async def clear_history(chat_id: int | str) -> None:
+    if not redis_configured():
+        return
+    try:
+        await redis_cmd("DEL", f"tg:hist:{chat_id}")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("history clear failed: %s", type(exc).__name__)
+
+
+async def ask_gemini(prompt: str, history: list[dict] | None = None) -> str:
+    contents = [
+        types.Content(role=m["role"], parts=[types.Part.from_text(text=m["text"])])
+        for m in (history or [])
+    ]
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt)]))
     response = await get_gemini_client().aio.models.generate_content(
         model=env("GEMINI_MODEL", DEFAULT_MODEL) or DEFAULT_MODEL,
-        contents=prompt,
+        contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION,
             temperature=0.7,
@@ -116,27 +198,16 @@ async def ask_gemini(prompt: str) -> str:
 
 
 async def claim_update(update_id: int) -> bool:
-    """Best-effort duplicate protection using an OPTIONAL Redis (Upstash REST) store.
+    """Best-effort duplicate protection (SET NX on update_id in the optional Redis).
 
-    Returns True if this update should be processed. If no Redis is configured,
-    or Redis is unreachable, it returns True (fail open) - serverless memory is
-    NOT durable, so we never pretend in-process state can deduplicate.
+    True => process this update. Fails open if Redis is missing or unreachable.
     """
-    base = env("UPSTASH_REDIS_REST_URL") or env("KV_REST_API_URL")
-    token = env("UPSTASH_REDIS_REST_TOKEN") or env("KV_REST_API_TOKEN")
-    if not base or not token:
+    if not redis_configured():
         return True
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(
-                base.rstrip("/"),
-                headers={"Authorization": f"Bearer {token}"},
-                json=["SET", f"tg:update:{update_id}", "1", "NX", "EX", str(DEDUPE_TTL_SECONDS)],
-            )
-        if response.status_code != 200:
-            return True
-        return response.json().get("result") == "OK"  # None => key already existed
-    except Exception as exc:  # noqa: BLE001 - fail open, log class only
+        result = await redis_cmd("SET", f"tg:update:{update_id}", "1", "NX", "EX", str(DEDUPE_TTL_SECONDS))
+        return result == "OK"  # None => key already existed => duplicate
+    except Exception as exc:  # noqa: BLE001
         log.warning("dedupe store unavailable: %s", type(exc).__name__)
         return True
 
@@ -178,13 +249,22 @@ async def webhook(
     try:
         command = parse_command(text)
         if command == "start":
-            await send_text(chat_id, START_TEXT)
+            notice = LOG_NOTICE if env("LOG_CHANNEL_ID") else ""
+            await send_text(chat_id, START_TEXT + notice)
         elif command == "help":
             await send_text(chat_id, HELP_TEXT)
+        elif command == "reset":
+            await clear_history(chat_id)
+            await send_text(chat_id, RESET_TEXT)
         else:
+            question = text.strip()[:MAX_INPUT_CHARS]
+            await log_to_channel(message, question)
+            history = await load_history(chat_id)
             typing_task = asyncio.create_task(keep_typing(chat_id))
+            answered = False
             try:
-                answer = await ask_gemini(text.strip()[:MAX_INPUT_CHARS])
+                answer = await ask_gemini(question, history)
+                answered = True
             except Exception as exc:  # noqa: BLE001
                 log.error("Gemini request failed: %s", type(exc).__name__)
                 answer = ERROR_TEXT
@@ -193,6 +273,8 @@ async def webhook(
                 with contextlib.suppress(asyncio.CancelledError):
                     await typing_task
             await send_text(chat_id, answer)
+            if answered and answer != EMPTY_ANSWER_TEXT:
+                await save_history(chat_id, history, question, answer)
     except Exception as exc:  # noqa: BLE001
         log.error("Handling update failed: %s", type(exc).__name__)
 

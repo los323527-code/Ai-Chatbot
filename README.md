@@ -18,7 +18,7 @@ No `vercel.json` is needed: Vercel detects `index.py` containing `app = FastAPI(
 ## Environment variables
 `TELEGRAM_TOKEN`, `GEMINI_API_KEY`, `TELEGRAM_WEBHOOK_SECRET`, `GEMINI_MODEL`
 (default `gemini-3.8-flash`, listed in Google's Gemini API docs). Optional:
-`UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` (duplicate protection).
+`UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` (memory and duplicate protection; `KV_REST_API_URL`/`KV_REST_API_TOKEN` also work).
 After changing variables, **redeploy**.
 
 ## Security
@@ -28,12 +28,22 @@ After changing variables, **redeploy**.
 - Always answers HTTP 200 after validation so Telegram does not retry endlessly.
 - If a token was ever pasted in a chat or screenshot, revoke it (BotFather `/revoke`).
 
+## Question log channel (optional)
+Set `LOG_CHANNEL_ID` and add the bot as admin (post permission) of that channel.
+Each question (not commands) is posted as: time (UTC+7), user name/@username/id,
+question text. Failures to post never stop the bot from answering. `/start` tells
+users their questions may be logged. This stores private user messages in Telegram -
+keep the channel private and tell your users.
+
 ## Memory and duplicates
-- The bot has **no conversation memory**: every message is answered on its own.
-  Durable memory needs a database (e.g. Redis/Postgres) - not implemented here.
-- Duplicate updates: Vercel memory is not persistent, so duplicates are only
-  filtered if you configure the optional Redis variables (`SET NX` on `update_id`).
-  Without Redis the bot still works, but a rare Telegram retry may answer twice.
+Both features use an OPTIONAL Redis (Upstash REST API). Vercel function memory is
+not persistent, so without Redis the bot is stateless.
+- **Conversation memory**: the last 20 messages per chat are stored in Redis for
+  7 days and sent to Gemini as context. `/reset` deletes them. This stores users'
+  messages in your database - tell your users and keep the database private.
+  Two messages sent at the same moment can overwrite each other's history (rare).
+- **Duplicate updates**: `SET NX` on `update_id` skips Telegram retries.
+- If Redis is down, the bot keeps answering (without memory / without dedupe).
 
 ## Test
 ```bash

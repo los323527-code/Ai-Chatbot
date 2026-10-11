@@ -1,6 +1,6 @@
 import unittest
 
-from helpers import parse_command, secrets_match, split_message
+from helpers import format_log_entry, parse_command, secrets_match, split_message, trim_history
 
 
 class SplitMessageTests(unittest.TestCase):
@@ -26,6 +26,7 @@ class ParseCommandTests(unittest.TestCase):
     def test_commands(self):
         self.assertEqual(parse_command("/start"), "start")
         self.assertEqual(parse_command("/help"), "help")
+        self.assertEqual(parse_command("/reset"), "reset")
         self.assertEqual(parse_command("/start@MyBot"), "start")
         self.assertEqual(parse_command("/help me please"), "help")
 
@@ -47,6 +48,35 @@ class SecretsMatchTests(unittest.TestCase):
 
     def test_non_ascii_does_not_raise(self):
         self.assertFalse(secrets_match("សួស្តី", "abc"))
+
+
+class TrimHistoryTests(unittest.TestCase):
+    def test_keeps_newest_and_starts_with_user(self):
+        hist = []
+        for i in range(30):
+            hist.append({"role": "user" if i % 2 == 0 else "model", "text": f"m{i}"})
+        out = trim_history(hist, max_messages=5)
+        self.assertLessEqual(len(out), 5)
+        self.assertEqual(out[0]["role"], "user")
+        self.assertEqual(out[-1]["text"], "m29")
+
+    def test_caps_length_and_drops_bad_items(self):
+        out = trim_history([{"role": "user", "text": "x" * 5000}, {"role": "bad", "text": "y"}, "junk"], max_chars=100)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(out[0]["text"]), 100)
+
+
+class FormatLogTests(unittest.TestCase):
+    def test_entry_has_time_user_question(self):
+        out = format_log_entry({"id": 7, "first_name": "Sok", "last_name": "A", "username": "sok"}, "សួស្តី", 1760000000)
+        self.assertIn("2025-10-09", out)
+        self.assertIn("Sok A (@sok, id 7)", out)
+        self.assertIn("សួស្តី", out)
+
+    def test_missing_user_and_long_text(self):
+        out = format_log_entry(None, "x" * 9000)
+        self.assertIn("Unknown", out)
+        self.assertLess(len(out), 3300)
 
 
 if __name__ == "__main__":
