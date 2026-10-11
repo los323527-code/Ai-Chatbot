@@ -27,6 +27,8 @@ class ParseCommandTests(unittest.TestCase):
         self.assertEqual(parse_command("/start"), "start")
         self.assertEqual(parse_command("/help"), "help")
         self.assertEqual(parse_command("/reset"), "reset")
+        self.assertEqual(parse_command("/chatid"), "chatid")
+        self.assertEqual(parse_command("/chatid@MyBot"), "chatid")
         self.assertEqual(parse_command("/start@MyBot"), "start")
         self.assertEqual(parse_command("/help me please"), "help")
 

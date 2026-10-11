@@ -28,6 +28,12 @@ After changing variables, **redeploy**.
 - Always answers HTTP 200 after validation so Telegram does not retry endlessly.
 - If a token was ever pasted in a chat or screenshot, revoke it (BotFather `/revoke`).
 
+## Finding a channel's ID (`/chatid`)
+Register the webhook with `allowed_updates=["message","channel_post"]`, make the bot
+an admin of the channel, then post `/chatid` in the channel: the bot replies with the
+numeric id (e.g. `-1001234567890`) to use as `LOG_CHANNEL_ID`. Other channel posts are
+ignored (never sent to Gemini). Also works in private chats and groups.
+
 ## Question log channel (optional)
 Set `LOG_CHANNEL_ID` and add the bot as admin (post permission) of that channel.
 Each question (not commands) is posted as: time (UTC+7), user name/@username/id,
@@ -58,7 +64,7 @@ read -s -p "WEBHOOK_SECRET: " SEC; echo
 curl -sS "https://api.telegram.org/bot${TG}/setWebhook" \
   --data-urlencode "url=https://YOUR-PROJECT.vercel.app/webhook" \
   --data-urlencode "secret_token=${SEC}" \
-  --data-urlencode 'allowed_updates=["message"]'
+  --data-urlencode 'allowed_updates=["message","channel_post"]'
 curl -sS "https://api.telegram.org/bot${TG}/getWebhookInfo"
 ```
 

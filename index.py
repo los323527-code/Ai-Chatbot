@@ -22,7 +22,7 @@ from helpers import format_log_entry, parse_command, secrets_match, split_messag
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("gemini-telegram-bot")
 
-app = FastAPI(title="Gemini Telegram Bot", version="5.0.0", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Gemini Telegram Bot", version="7.0.0", docs_url=None, redoc_url=None, openapi_url=None)
 
 TELEGRAM_API = "https://api.telegram.org"
 DEFAULT_MODEL = "gemini-3.8-flash"
@@ -61,19 +61,6 @@ EMPTY_ANSWER_TEXT = "សូមអភ័យទោស ខ្ញុំមិនអ�
 
 def env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
-
-
-_gemini_client: genai.Client | None = None
-
-
-def get_gemini_client() -> genai.Client:
-    global _gemini_client
-    if _gemini_client is None:
-        _gemini_client = genai.Client(
-            api_key=env("GEMINI_API_KEY"),
-            http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
-        )
-    return _gemini_client
 
 
 async def telegram_call(method: str, payload: dict[str, Any]) -> None:
@@ -178,13 +165,19 @@ async def clear_history(chat_id: int | str) -> None:
         log.warning("history clear failed: %s", type(exc).__name__)
 
 
-async def ask_gemini(prompt: str, history: list[dict] | None = None) -> str:
+def _ask_gemini_sync(prompt: str, history: list[dict]) -> str:
+    # A fresh client per call (run in a worker thread) avoids reusing a client that is
+    # bound to an old event loop between serverless invocations.
+    client = genai.Client(
+        api_key=env("GEMINI_API_KEY"),
+        http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
+    )
     contents = [
         types.Content(role=m["role"], parts=[types.Part.from_text(text=m["text"])])
-        for m in (history or [])
+        for m in history
     ]
     contents.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt)]))
-    response = await get_gemini_client().aio.models.generate_content(
+    response = client.models.generate_content(
         model=env("GEMINI_MODEL", DEFAULT_MODEL) or DEFAULT_MODEL,
         contents=contents,
         config=types.GenerateContentConfig(
@@ -195,6 +188,10 @@ async def ask_gemini(prompt: str, history: list[dict] | None = None) -> str:
     )
     answer = getattr(response, "text", None)
     return answer.strip() if answer else EMPTY_ANSWER_TEXT
+
+
+async def ask_gemini(prompt: str, history: list[dict] | None = None) -> str:
+    return await asyncio.to_thread(_ask_gemini_sync, prompt, history or [])
 
 
 async def claim_update(update_id: int) -> bool:
@@ -233,12 +230,20 @@ async def webhook(
         return {"ok": True}
 
     message = update.get("message")  # edited messages are intentionally ignored
+    from_channel = False
+    if not isinstance(message, dict):
+        message = update.get("channel_post")
+        from_channel = isinstance(message, dict)
     if not isinstance(message, dict):
         return {"ok": True}
     chat = message.get("chat") or {}
     chat_id = chat.get("id")
     text = message.get("text")
     if chat_id is None or not isinstance(text, str) or not text.strip():
+        return {"ok": True}
+
+    # Posts inside a channel are only used for the /chatid helper; never sent to Gemini.
+    if from_channel and parse_command(text) != "chatid":
         return {"ok": True}
 
     update_id = update.get("update_id")
@@ -253,6 +258,8 @@ async def webhook(
             await send_text(chat_id, START_TEXT + notice)
         elif command == "help":
             await send_text(chat_id, HELP_TEXT)
+        elif command == "chatid":
+            await send_text(chat_id, f"Chat ID: {chat_id}")
         elif command == "reset":
             await clear_history(chat_id)
             await send_text(chat_id, RESET_TEXT)
@@ -266,7 +273,8 @@ async def webhook(
                 answer = await ask_gemini(question, history)
                 answered = True
             except Exception as exc:  # noqa: BLE001
-                log.error("Gemini request failed: %s", type(exc).__name__)
+                # Class name and HTTP status code only - never the message (may hold secrets).
+                log.error("Gemini request failed: %s (code=%s)", type(exc).__name__, getattr(exc, "code", "n/a"))
                 answer = ERROR_TEXT
             finally:
                 typing_task.cancel()

@@ -118,6 +118,20 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.send.assert_awaited()
 
+    def test_chatid_command_replies_with_id(self):
+        self.client.post("/webhook", json=update("/chatid", update_id=20), headers=HEADERS)
+        self.send.assert_awaited_once_with(42, "Chat ID: 42")
+        self.ask.assert_not_called()
+
+    def test_channel_post_chatid_works_but_other_posts_ignored(self):
+        cp = lambda text, uid: {"update_id": uid, "channel_post": {"chat": {"id": -1001234}, "text": text}}
+        self.client.post("/webhook", json=cp("/chatid", 21), headers=HEADERS)
+        self.send.assert_awaited_once_with(-1001234, "Chat ID: -1001234")
+        self.send.reset_mock()
+        self.client.post("/webhook", json=cp("hello everyone", 22), headers=HEADERS)
+        self.ask.assert_not_called()
+        self.send.assert_not_called()
+
     def test_typing_indicator_sent_for_questions_only(self):
         self.client.post("/webhook", json=update("hi"), headers=HEADERS)
         self.tg.assert_any_await("sendChatAction", {"chat_id": 42, "action": "typing"})

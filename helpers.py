@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 MAX_TELEGRAM_LENGTH = 4000  # Telegram hard limit is 4096; keep a safety margin.
 EMPTY_FALLBACK = "សូមសាកល្បងម្ដងទៀត។ / Please try again."
 
-_COMMAND_RE = re.compile(r"^/(start|help|reset)(?:@[A-Za-z0-9_]+)?(?:\s|$)", re.IGNORECASE)
+_COMMAND_RE = re.compile(r"^/(start|help|reset|chatid)(?:@[A-Za-z0-9_]+)?(?:\s|$)", re.IGNORECASE)
 
 
 def split_message(text: str, limit: int = MAX_TELEGRAM_LENGTH) -> list[str]:
@@ -29,7 +29,7 @@ def split_message(text: str, limit: int = MAX_TELEGRAM_LENGTH) -> list[str]:
 
 
 def parse_command(text: str) -> str | None:
-    """Return 'start', 'help' or 'reset' for /start, /help, /reset (also /cmd@BotName); else None."""
+    """Return 'start', 'help', 'reset' or 'chatid' for /start, /help, /reset, /chatid (also /cmd@BotName); else None."""
     match = _COMMAND_RE.match((text or "").strip())
     return match.group(1).lower() if match else None
 
