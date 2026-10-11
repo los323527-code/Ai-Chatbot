@@ -1,81 +1,127 @@
-import asyncio
+"""Gemini Telegram bot for Vercel (FastAPI + Telegram webhook).
+
+Security notes:
+- Never log tokens, API keys, message text, or exception messages
+  (httpx error messages can contain the bot token inside the URL).
+- Webhook calls are accepted only with the correct X-Telegram-Bot-Api-Secret-Token.
+"""
+import logging
 import os
-import re
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from google import genai
+from google.genai import types
 
-app = FastAPI(title="Gemini Telegram Bot", version="2.0.0")
+from helpers import parse_command, secrets_match, split_message
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("gemini-telegram-bot")
+
+app = FastAPI(title="Gemini Telegram Bot", version="3.0.0", docs_url=None, redoc_url=None, openapi_url=None)
 
 TELEGRAM_API = "https://api.telegram.org"
 DEFAULT_MODEL = "gemini-3.8-flash"
-MAX_TELEGRAM_LENGTH = 4000
+MAX_INPUT_CHARS = 4000
+GEMINI_TIMEOUT_MS = 45_000
+DEDUPE_TTL_SECONDS = 3600
+
+SYSTEM_INSTRUCTION = (
+    "You are a helpful Telegram AI assistant. Answer clearly and accurately. "
+    "Always reply in the same language the user writes in (Khmer or English). "
+    "Keep answers suitable for Telegram chat. Do not use Markdown tables."
+)
+
+START_TEXT = (
+    "សួស្តី! 👋 ខ្ញុំជា Gemini AI Bot។\n"
+    "ផ្ញើសំណួរមកខ្ញុំបាន ដូចជា សួរចំណេះដឹង បកប្រែ ឬសរសេរកូដ។\n\n"
+    "Hello! I'm a Gemini AI bot. Send me a question in Khmer or English."
+)
+HELP_TEXT = (
+    "🤖 របៀបប្រើ៖ ផ្ញើសំណួរជាអត្ថបទមកខ្ញុំ។\n"
+    "/start — ចាប់ផ្ដើម, /help — ជំនួយ\n\n"
+    "How to use: send a text question. Commands: /start, /help"
+)
+ERROR_TEXT = (
+    "សូមអភ័យទោស! មានបញ្ហាក្នុងការភ្ជាប់ AI។ សូមសាកម្ដងទៀតពេលក្រោយ។\n"
+    "Sorry, something went wrong. Please try again later."
+)
+EMPTY_ANSWER_TEXT = "សូមអភ័យទោស ខ្ញុំមិនអាចបង្កើតចម្លើយបានទេ។ / Sorry, I could not generate an answer."
 
 
-def required_env(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if not value:
-        raise RuntimeError(f"Missing environment variable: {name}")
-    return value
+def env(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
 
 
-def split_message(text: str, limit: int = MAX_TELEGRAM_LENGTH) -> list[str]:
-    text = (text or "").strip() or "សូមសាកល្បងម្ដងទៀត។"
-    chunks = []
-    while len(text) > limit:
-        cut = text.rfind("\n", 0, limit)
-        if cut < limit // 2:
-            cut = text.rfind(" ", 0, limit)
-        if cut < limit // 2:
-            cut = limit
-        chunks.append(text[:cut].strip())
-        text = text[cut:].strip()
-    if text:
-        chunks.append(text)
-    return chunks
+_gemini_client: genai.Client | None = None
 
 
-async def telegram_call(token: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-    url = f"{TELEGRAM_API}/bot{token}/{method}"
+def get_gemini_client() -> genai.Client:
+    global _gemini_client
+    if _gemini_client is None:
+        _gemini_client = genai.Client(
+            api_key=env("GEMINI_API_KEY"),
+            http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
+        )
+    return _gemini_client
+
+
+async def telegram_call(method: str, payload: dict[str, Any]) -> None:
+    url = f"{TELEGRAM_API}/bot{env('TELEGRAM_TOKEN')}/{method}"
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.post(url, json=payload)
-        response.raise_for_status()
-        result = response.json()
-    if not result.get("ok"):
-        raise RuntimeError(f"Telegram API {method} failed")
-    return result
+    # Do not use raise_for_status(): its message contains the URL (and the token).
+    if response.status_code != 200:
+        raise RuntimeError(f"Telegram {method} returned HTTP {response.status_code}")
 
 
-async def send_text(token: str, chat_id: int | str, text: str) -> None:
+async def send_text(chat_id: int | str, text: str) -> None:
     for chunk in split_message(text):
-        await telegram_call(token, "sendMessage", {
-            "chat_id": chat_id,
-            "text": chunk,
-            "disable_web_page_preview": True,
-        })
+        await telegram_call(
+            "sendMessage",
+            {"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True},
+        )
 
 
-def ask_gemini(api_key: str, model: str, prompt: str) -> str:
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=model,
+async def ask_gemini(prompt: str) -> str:
+    response = await get_gemini_client().aio.models.generate_content(
+        model=env("GEMINI_MODEL", DEFAULT_MODEL) or DEFAULT_MODEL,
         contents=prompt,
-        config={
-            "system_instruction": (
-                "You are a helpful Telegram AI assistant. "
-                "Answer clearly and accurately. Reply in Khmer when the user writes Khmer. "
-                "Keep responses suitable for Telegram chat."
-            ),
-            "temperature": 0.7,
-            "max_output_tokens": 2048,
-        },
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION,
+            temperature=0.7,
+            max_output_tokens=4096,
+        ),
     )
     answer = getattr(response, "text", None)
-    if not answer:
-        return "សូមអភ័យទោស ខ្ញុំមិនអាចបង្កើតចម្លើយបានទេ។ សូមសាកម្ដងទៀត។"
-    return answer.strip()
+    return answer.strip() if answer else EMPTY_ANSWER_TEXT
+
+
+async def claim_update(update_id: int) -> bool:
+    """Best-effort duplicate protection using an OPTIONAL Redis (Upstash REST) store.
+
+    Returns True if this update should be processed. If no Redis is configured,
+    or Redis is unreachable, it returns True (fail open) - serverless memory is
+    NOT durable, so we never pretend in-process state can deduplicate.
+    """
+    base = env("UPSTASH_REDIS_REST_URL") or env("KV_REST_API_URL")
+    token = env("UPSTASH_REDIS_REST_TOKEN") or env("KV_REST_API_TOKEN")
+    if not base or not token:
+        return True
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                base.rstrip("/"),
+                headers={"Authorization": f"Bearer {token}"},
+                json=["SET", f"tg:update:{update_id}", "1", "NX", "EX", str(DEDUPE_TTL_SECONDS)],
+            )
+        if response.status_code != 200:
+            return True
+        return response.json().get("result") == "OK"  # None => key already existed
+    except Exception as exc:  # noqa: BLE001 - fail open, log class only
+        log.warning("dedupe store unavailable: %s", type(exc).__name__)
+        return True
 
 
 @app.get("/")
@@ -88,59 +134,44 @@ async def webhook(
     request: Request,
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
 ) -> dict[str, bool]:
-    expected_secret = required_env("TELEGRAM_WEBHOOK_SECRET")
-    if not x_telegram_bot_api_secret_token or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", expected_secret):
+    if not secrets_match(x_telegram_bot_api_secret_token, env("TELEGRAM_WEBHOOK_SECRET")):
         raise HTTPException(status_code=403, detail="Forbidden")
-    if not __import__("hmac").compare_digest(x_telegram_bot_api_secret_token, expected_secret):
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    token = required_env("TELEGRAM_TOKEN")
-    api_key = required_env("GEMINI_API_KEY")
-    model = os.getenv("GEMINI_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
 
     try:
         update = await request.json()
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-
-    message = update.get("message") or update.get("edited_message")
-    if not isinstance(message, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON") from None
+    if not isinstance(update, dict):
         return {"ok": True}
 
+    message = update.get("message")  # edited messages are intentionally ignored
+    if not isinstance(message, dict):
+        return {"ok": True}
     chat = message.get("chat") or {}
     chat_id = chat.get("id")
-    text = message.get("text", "")
+    text = message.get("text")
     if chat_id is None or not isinstance(text, str) or not text.strip():
         return {"ok": True}
 
-    if text.strip().startswith("/start"):
-        await send_text(
-            token,
-            chat_id,
-            "សួស្តី! 👋 ខ្ញុំជា Gemini AI Bot។\n"
-            "ផ្ញើសំណួរមកខ្ញុំបាន ដូចជា សួរចំណេះដឹង បកប្រែ ឬសរសេរកូដ។",
-        )
-        return {"ok": True}
+    update_id = update.get("update_id")
+    if isinstance(update_id, int) and not await claim_update(update_id):
+        return {"ok": True}  # duplicate delivery
 
-    if text.strip().startswith("/help"):
-        await send_text(
-            token,
-            chat_id,
-            "🤖 របៀបប្រើ៖ ផ្ញើសំណួរជាអត្ថបទមកខ្ញុំ។\n"
-            "បញ្ជា៖ /start — ចាប់ផ្ដើម, /help — ជំនួយ",
-        )
-        return {"ok": True}
-
+    # From here on we always answer HTTP 200 so Telegram does not retry endlessly.
     try:
-        answer = await asyncio.to_thread(ask_gemini, api_key, model, text.strip())
-        await send_text(token, chat_id, answer)
-    except Exception:
-        # Avoid leaking API keys or internal exception details to Telegram users.
-        await send_text(
-            token,
-            chat_id,
-            "សូមអភ័យទោស! មានបញ្ហាក្នុងការភ្ជាប់ AI។ សូមសាកម្ដងទៀតពេលក្រោយ។",
-        )
-        print("Gemini/Telegram request failed; check Vercel Function Logs.")
+        command = parse_command(text)
+        if command == "start":
+            await send_text(chat_id, START_TEXT)
+        elif command == "help":
+            await send_text(chat_id, HELP_TEXT)
+        else:
+            try:
+                answer = await ask_gemini(text.strip()[:MAX_INPUT_CHARS])
+            except Exception as exc:  # noqa: BLE001
+                log.error("Gemini request failed: %s", type(exc).__name__)
+                answer = ERROR_TEXT
+            await send_text(chat_id, answer)
+    except Exception as exc:  # noqa: BLE001
+        log.error("Handling update failed: %s", type(exc).__name__)
 
     return {"ok": True}
